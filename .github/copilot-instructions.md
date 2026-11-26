@@ -1,0 +1,64 @@
+# Copilot instructions
+
+## Project overview
+
+This repository is a Klipper extension for managing manual tool changes on a
+HermitCrab toolhead. The extension is intended to:
+
+- Live in `extras/` and integrate with Klipper's extension-loading mechanism.
+- Load toolhead definitions into the extension's runtime objects, merging their
+  settings with the existing Klipper configuration rather than replacing
+  unrelated configuration.
+- Keep head-specific values such as PID settings, probe `z_offset`, and other
+  calibration data with the currently active toolhead configuration.
+- Provide `install.sh` to link extension modules into a Klipper installation
+  and remove those links without changing unrelated files.
+
+Treat toolhead configuration as belonging to its individual head. When the
+active head changes, use that head's settings and calibration values; do not
+silently apply one head's data to another.
+
+The main `printer.cfg` owns shared hardware configuration. Toolhead files under
+`printer_data/config/toolheads/` are Klipper config fragments: `base.cfg`
+contains common toolhead defaults and `<name>.cfg` contains per-head overrides.
+`toolheads/base.cfg` and `toolheads/active.cfg` are included after shared
+settings; the active link points to the selected profile so the last selected
+head loads at startup. When storing calibration values, follow the include tree
+and update both the selected profile and the latest shared section owner.
+
+## Repository conventions
+
+- Keep Klipper-facing extension code in `extras/`. Keep installation-related
+  Python code in `installer/` if it is added.
+- Use `./install.sh install /path/to/klipper` and
+  `./install.sh uninstall /path/to/klipper` to manage links in Klipper's
+  `klippy/extras/` directory. The script must never replace existing files.
+- The Klipper module is `extras/hermitcrab.py`. Keep its G-code commands,
+  active-profile status, profile switching, and calibration persistence
+  consistent with the setup documented in `README.md`.
+- Profile activation requires a Klipper restart; do not mutate Klipper's
+  config-time objects directly to simulate a live reload.
+- Preserve existing Klipper configuration and merge only the settings owned by
+  this extension.
+- Retain compatibility with Python 3.8 and Klipper's runtime environment.
+- Use four-space indentation, double-quoted strings, and an 88-character line
+  length for Python, following the Ruff configuration in `pyproject.toml`.
+- Keep function signatures and implementation bodies type-checkable under the
+  strict mypy settings in `mypy.ini`.
+- Add focused tests for behavior changes, especially configuration merging,
+  active-head calibration selection, and installer link/unlink behavior.
+
+## Validation
+
+The project configures pytest to discover tests under `tests/`. For Python
+changes, run the focused relevant tests, then the applicable checks:
+
+```sh
+pytest
+ruff check extras installer
+mypy
+```
+
+Do not assume a Klipper checkout is present in this repository; local Klipper
+imports are optional, and the project configures type-checking stubs under
+`klipper_stubs/`.

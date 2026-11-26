@@ -1,0 +1,28 @@
+{
+    "terminal.integrated.env.linux": {
+        "PYTHONPATH": "${workspaceFolder};${workspaceFolder}/klipper/klippy"
+    },
+    "terminal.integrated.env.osx": {
+        "PYTHONPATH": "${workspaceFolder};${workspaceFolder}/klipper/klippy"
+    },
+    "terminal.integrated.env.windows": {
+        "PYTHONPATH": "${workspaceFolder};${workspaceFolder}/klipper/klippy"
+    },
+    "python.autoComplete.extraPaths": [
+        "${workspaceFolder}/klipper/klippy"
+    ],
+    "python.defaultInterpreterPath": "/home/ender3/klippy-env/bin/python",
+    "python.analysis.extraPaths": [
+        "/home/ender3/klipper/klippy",
+        "/home/ender3/klipper/klippy/extras",
+        "/home/ender3/klipper/klippy/kinematics"
+    ],
+    "[python]": {
+        "editor.rulers": [
+            {
+                "column": 100,
+                "color": "#ec3507"
+            }
+        ]
+    }
+}
