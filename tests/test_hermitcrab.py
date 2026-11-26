@@ -1,241 +1,228 @@
 from pathlib import Path
-from typing import Any, Dict, Optional
+import threading
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional
 
 import pytest
 
-from extras.hermitcrab import HermitCrab
+from extras.hc_head import HCHead, load_config_prefix
+from extras.hermitcrab import HermitCrab, set_section_options
 
 
 class FakeGCode:
     def __init__(self) -> None:
         self.commands: Dict[str, Any] = {}
-        self.scripts = []
 
     def register_command(self, command: str, callback: Any, desc: Any = None) -> None:
         self.commands[command] = callback
 
-    def run_script(self, script: str) -> None:
-        self.scripts.append(script)
-
 
 class FakeCommand:
-    def __init__(self, params: Optional[Dict[str, str]] = None) -> None:
-        self.params = params or {}
-        self.messages = []
+    def __init__(self, params: Dict[str, str]) -> None:
+        self.params = params
+        self.messages: List[str] = []
 
-    def get(self, name: str, default: Optional[str] = None) -> Optional[str]:
-        return self.params.get(name, default)
+    def get(self, name: str, default: Optional[str] = None) -> Any:
+        if name in self.params:
+            return self.params[name]
+        if default is None:
+            raise KeyError(name)
+        return default
+
+    def get_float(self, name: str, default: Any = None) -> Any:
+        return float(self.params[name]) if name in self.params else default
 
     def error(self, message: str) -> Exception:
         return RuntimeError(message)
 
-    def respond_info(self, message: str) -> None:
+    def respond_raw(self, message: str) -> None:
         self.messages.append(message)
 
 
-class FakeStatusObject:
-    def __init__(self, status: Dict[str, Any]) -> None:
-        self.status = status
-
-    def get_status(self, eventtime: float) -> Dict[str, Any]:
-        return self.status
-
-
-class FakeReactor:
-    def monotonic(self) -> float:
-        return 0.0
-
-
 class FakePrinter:
-    def __init__(self, config_file: Path, pending: Dict[str, Any]) -> None:
+    def __init__(self, config_file: Path) -> None:
         self.gcode = FakeGCode()
-        self.objects = {
-            "gcode": self.gcode,
-            "configfile": FakeStatusObject(
-                {
-                    "save_config_pending": bool(pending),
-                    "save_config_pending_items": pending,
-                }
-            ),
-        }
         self.config_file = config_file
 
     def get_start_args(self) -> Dict[str, Any]:
         return {"config_file": str(self.config_file)}
 
     def lookup_object(self, name: str, default: Any = None) -> Any:
-        return self.objects.get(name, default)
+        return self.gcode if name == "gcode" else default
 
-    def get_reactor(self) -> FakeReactor:
-        return FakeReactor()
+    def get_reactor(self) -> Any:
+        return None
+
+    def load_object(self, config: Any, name: str) -> "HermitCrab":
+        return self.manager
 
 
 class FakeConfig:
-    def __init__(self, printer: FakePrinter) -> None:
+    def __init__(self, printer: FakePrinter, name: str, values: Dict[str, str]) -> None:
         self.printer = printer
+        self.name = name
+        self.values = values
 
-    def get(self, key: str, default: Optional[str] = None) -> str:
-        return default or ""
+    def get_name(self) -> str:
+        return self.name
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.values.get(key, default)
+
+    def getfloat(self, key: str, default: Any = None) -> Any:
+        return float(self.values[key]) if key in self.values else default
 
     def get_printer(self) -> FakePrinter:
         return self.printer
 
-    def error(self, message: str) -> Exception:
-        return RuntimeError(message)
+    def error(self, msg: str) -> RuntimeError:
+        return RuntimeError(msg)
 
 
-def make_plugin(tmp_path: Path, pending: Optional[Dict[str, Any]] = None) -> HermitCrab:
-    config_directory = tmp_path / "printer_data" / "config"
-    toolheads = config_directory / "toolheads"
-    toolheads.mkdir(parents=True)
-    shared = config_directory / "shared"
-    shared.mkdir()
-    (shared / "hardware.cfg").write_text(
-        "[probe]\npin: ^PA1\n\n[extruder]\nheater_pin: PA2\n",
-        encoding="utf-8",
-    )
-    base_defaults = toolheads / "defaults"
-    base_defaults.mkdir()
-    (toolheads / "base.cfg").write_text(
-        "[include defaults/toolhead.cfg]\n",
-        encoding="utf-8",
-    )
-    (toolheads / "active.cfg").touch()
-    (base_defaults / "toolhead.cfg").write_text(
-        "[probe]\nz_offset: 0.1 ; default probe offset\n\n"
-        "[extruder]\npid_Kp: 10.0\n"
-        "#*# <---------------------- SAVE_CONFIG ---------------------->\n"
-        "#*# [probe]\n"
-        "#*# z_offset = 0.1\n",
-        encoding="utf-8",
-    )
-    config_file = config_directory / "printer.cfg"
-    config_file.write_text(
-        "[include shared/hardware.cfg]\n"
-        "[include toolheads/base.cfg]\n"
-        "[include toolheads/active.cfg]\n",
-        encoding="utf-8",
-    )
-    printer = FakePrinter(config_file, pending or {})
-    return HermitCrab(FakeConfig(printer))
+def make_manager(tmp_path: Path, text: str) -> HermitCrab:
+    config_file = tmp_path / "printer.cfg"
+    config_file.write_text(text)
+    (tmp_path / "toolheads.cfg").write_text("")
+    printer = FakePrinter(config_file)
+    manager = HermitCrab(FakeConfig(printer, "hermitcrab", {"file": "toolheads.cfg"}))
+    printer.manager = manager
+    return manager
 
 
-def test_set_active_head_links_profile_and_restarts(tmp_path: Path) -> None:
-    plugin = make_plugin(tmp_path)
-    profile = plugin.toolheads_directory / "tool0.cfg"
-    profile.write_text("[probe]\nz_offset: 0.2\n", encoding="utf-8")
-
-    command = FakeCommand({"HEAD": "tool0"})
-    plugin.cmd_SET_ACTIVE_HEAD(command)
-
-    assert plugin._active_head() == "tool0"
-    assert plugin.get_status(0.0)["available_heads"] == ["tool0"]
-    assert plugin.gcode.scripts == ["RESTART"]
-
-
-def test_store_active_head_values_preserves_profile_content(
+def test_set_section_options_fills_placeholder_and_replaces_active_lines(
     tmp_path: Path,
 ) -> None:
-    pending = {
-        "probe": {"z_offset": "0.35"},
-        "extruder": {"pid_Kp": "21.4", "pid_Ki": "1.1", "pid_Kd": "105.0"},
-    }
-    plugin = make_plugin(tmp_path, pending)
-    profile = plugin.toolheads_directory / "tool0.cfg"
-    profile.write_text(
-        "# toolhead-specific settings\n[probe]\nx_offset: 1.0\nz_offset: 0.35\n",
-        encoding="utf-8",
+    path = tmp_path / "toolheads.cfg"
+    path.write_text(
+        "[hc_head emil]\n"
+        "# x_offset: <mm>\n"
+        "# z_offset: <mm>\n"
+        "pid_kp: 1.0\n"
+        "\n"
+        "[hc_head willi]\n"
+        "z_offset: 0.1\n"
     )
-    active_config = plugin.toolheads_directory / "active.cfg"
-    active_config.unlink()
-    active_config.symlink_to(profile.name)
 
-    sources = plugin._read_config_sources(profile)
-    assert sources.merged_values["probe"]["z_offset"] == "0.35"
-
-    plugin.cmd_STORE_ACTIVE_HEAD(FakeCommand())
-    contents = profile.read_text(encoding="utf-8")
-    shared_defaults = (
-        plugin.toolheads_directory / "defaults" / "toolhead.cfg"
-    ).read_text(encoding="utf-8")
-
-    assert "# toolhead-specific settings" in contents
-    assert "x_offset: 1.0" in contents
-    assert "[probe]\nz_offset: 0.35" in contents
-    assert "[extruder]" in contents
-    assert "pid_Kp: 21.4" in contents
-    assert contents.count("# BEGIN HERMITCRAB STORED VALUES") == 1
-    assert "z_offset: 0.35" in shared_defaults
-    assert "z_offset: 0.35 ; default probe offset" in shared_defaults
-    assert "pid_Kp: 21.4" in shared_defaults
-    assert shared_defaults.index("pid_Ki: 1.1") < shared_defaults.index(
-        "#*# <---------------------- SAVE_CONFIG"
+    set_section_options(
+        str(path), "hc_head emil", {"x_offset": "-35", "pid_kp": "41.3"}
     )
-    assert plugin.gcode.scripts == ["RESTART"]
 
-    plugin.printer.objects["configfile"].status = {
-        "save_config_pending": True,
-        "save_config_pending_items": {"probe": {"z_offset": "0.42"}},
-    }
-    plugin.cmd_STORE_ACTIVE_HEAD(FakeCommand())
-    contents = profile.read_text(encoding="utf-8")
-    shared_defaults = (
-        plugin.toolheads_directory / "defaults" / "toolhead.cfg"
-    ).read_text(encoding="utf-8")
-
-    assert contents.count("# BEGIN HERMITCRAB STORED VALUES") == 1
-    managed_values = contents.split("# BEGIN HERMITCRAB STORED VALUES", 1)[
-        1
-    ].split("# END HERMITCRAB STORED VALUES", 1)[0]
-    assert "z_offset: 0.42" in managed_values
-    assert "z_offset: 0.35" not in managed_values
-    assert "z_offset: 0.42" in shared_defaults
+    assert path.read_text() == (
+        "[hc_head emil]\n"
+        "# x_offset: <mm>\n"
+        "x_offset: -35\n"
+        "# z_offset: <mm>\n"
+        "pid_kp: 41.3\n"
+        "\n"
+        "[hc_head willi]\n"
+        "z_offset: 0.1\n"
+    )
 
 
-def test_store_active_head_rejects_unrelated_pending_values(
+def test_set_section_options_appends_missing_section(tmp_path: Path) -> None:
+    path = tmp_path / "toolheads.cfg"
+    path.write_text("[hc_head emil]\nz_offset: 0.4\n")
+
+    set_section_options(str(path), "hc_head willi", {"z_offset": "0.1"})
+
+    assert path.read_text() == (
+        "[hc_head emil]\nz_offset: 0.4\n\n[hc_head willi]\nz_offset: 0.1\n"
+    )
+
+
+def test_add_head_appends_commented_template_and_rejects_duplicates(
     tmp_path: Path,
 ) -> None:
-    plugin = make_plugin(
-        tmp_path, {"stepper_x": {"position_min": "-1"}}
+    manager = make_manager(tmp_path, "[hermitcrab]\nfile: toolheads.cfg\n")
+    path = tmp_path / "toolheads.cfg"
+    add_head = manager.gcode.commands["HC_ADD_HEAD"]
+
+    add_head(FakeCommand({"NAME": "Emil"}))
+    text = path.read_text()
+    assert text.startswith("\n[hc_head emil]\n# Probe offsets")
+    assert "\n# x_offset: <mm>\n" in text
+    assert "# pid_kp: <float>" in text
+    assert "# probe_stow_angle: <deg>" in text
+    assert "\n[output_pin TOOLHEAD_EMIL]\npin: virtual_pin:head_emil\nvalue: 0\n" in text
+    assert "\n[gcode_macro USE_HEAD_EMIL]\n" in text
+    assert "    HC_SET_HEAD HEAD=emil\n" in text
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        add_head(FakeCommand({"NAME": "emil"}))
+
+
+def test_add_head_refuses_existing_pin_or_macro(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path, "[hermitcrab]\nfile: toolheads.cfg\n")
+    path = tmp_path / "toolheads.cfg"
+    path.write_text("[output_pin TOOLHEAD_WILLI]\npin: virtual_pin:head_willi\n")
+    before = path.read_text()
+    with pytest.raises(RuntimeError, match=r"\[output_pin TOOLHEAD_WILLI\] already"):
+        manager.gcode.commands["HC_ADD_HEAD"](FakeCommand({"NAME": "willi"}))
+    assert path.read_text() == before
+
+
+def test_add_head_rejects_invalid_name(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path, "[hermitcrab]\n")
+    with pytest.raises(RuntimeError, match="Invalid head name"):
+        manager.gcode.commands["HC_ADD_HEAD"](FakeCommand({"NAME": "bad name"}))
+    with pytest.raises(RuntimeError, match="Invalid head name"):
+        manager.gcode.commands["HC_ADD_HEAD"](FakeCommand({"NAME": "bad-name"}))
+
+
+def test_set_pid_applies_config_units_to_heater_controller(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path, "[hermitcrab]\nfile: toolheads.cfg\n")
+    control = SimpleNamespace(Kp=0.0, Ki=0.0, Kd=0.0)
+    heater = SimpleNamespace(lock=threading.Lock(), control=control)
+    heaters = SimpleNamespace(lookup_heater=lambda name: heater)
+    manager.printer = SimpleNamespace(lookup_object=lambda name: heaters)
+
+    manager._set_pid(255.0, 25.5, 510.0)
+
+    assert control.Kp == pytest.approx(1.0)
+    assert control.Ki == pytest.approx(0.1)
+    assert control.Kd == pytest.approx(2.0)
+
+
+def test_head_loader_registers_only_configured_values(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path, "[hermitcrab]\n")
+    printer = manager.printer
+    config = FakeConfig(
+        printer, "hc_head Emil", {"x_offset": "-35", "pid_kp": "41.346"}
     )
-    profile = plugin.toolheads_directory / "tool0.cfg"
-    profile.write_text("[probe]\nz_offset: 0.2\n", encoding="utf-8")
-    active_config = plugin.toolheads_directory / "active.cfg"
-    active_config.unlink()
-    active_config.symlink_to(profile.name)
-    before = profile.read_text(encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="cannot store pending settings"):
-        plugin.cmd_STORE_ACTIVE_HEAD(FakeCommand())
+    load_config_prefix(config)
 
-    assert profile.read_text(encoding="utf-8") == before
-    assert plugin.gcode.scripts == []
+    assert list(manager.heads) == ["emil"]
+    head = manager.heads["emil"]
+    assert isinstance(head, HCHead)
+    assert head.values == {"x_offset": -35.0, "pid_kp": 41.346}
 
 
-def test_set_active_head_refuses_active_virtual_sd_print(tmp_path: Path) -> None:
-    plugin = make_plugin(tmp_path)
-    profile = plugin.toolheads_directory / "tool0.cfg"
-    profile.write_text("[probe]\nz_offset: 0.2\n", encoding="utf-8")
-    plugin.printer.objects["virtual_sdcard"] = FakeStatusObject(
-        {"is_active": True}
+def test_head_logo_predefined_custom_and_errors(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path, "[hermitcrab]\n")
+    printer = manager.printer
+
+    load_config_prefix(FakeConfig(printer, "hc_head cat", {"logo": "Cat"}))
+    assert manager.heads["cat"].logo == (" /\\_/\\", "( o.o )", " > ^ <")
+
+    custom = {"logo": "custom", "logo_custom": " /|\\ |  o  "}
+    load_config_prefix(FakeConfig(printer, "hc_head mine", custom))
+    assert manager.heads["mine"].logo == (" /", "\\", "  o")
+
+    with pytest.raises(RuntimeError, match="needs logo_custom"):
+        load_config_prefix(FakeConfig(printer, "hc_head bad", {"logo": "custom"}))
+    with pytest.raises(RuntimeError, match="Unknown logo"):
+        load_config_prefix(FakeConfig(printer, "hc_head bad2", {"logo": "dog"}))
+
+
+def test_format_shows_logo_only_in_full_output(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path, "[hermitcrab]\n")
+    load_config_prefix(
+        FakeConfig(manager.printer, "hc_head emil", {"logo": "crab", "x_offset": "-35"})
     )
+    head = manager.heads["emil"]
 
-    with pytest.raises(RuntimeError, match="virtual SD print is active"):
-        plugin.cmd_SET_ACTIVE_HEAD(FakeCommand({"HEAD": "tool0"}))
-
-    assert not (plugin.toolheads_directory / "active.cfg").is_symlink()
-    assert plugin.gcode.scripts == []
-
-
-def test_base_profile_must_be_included_before_active_profile(
-    tmp_path: Path,
-) -> None:
-    plugin = make_plugin(tmp_path)
-    plugin.config_file.write_text(
-        "[include toolheads/active.cfg]\n"
-        "[include toolheads/base.cfg]\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(RuntimeError, match="base.cfg before"):
-        HermitCrab(FakeConfig(FakePrinter(plugin.config_file, {})))
+    full = head.format()
+    assert full.startswith("    ,-.       ,-.\n")
+    assert full.endswith("  [hc_head emil] x_offset: -35")
+    assert head.format({"x_offset": -35.0}) == "  [hc_head emil] x_offset: -35"

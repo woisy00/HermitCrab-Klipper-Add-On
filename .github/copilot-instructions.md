@@ -18,13 +18,13 @@ Treat toolhead configuration as belonging to its individual head. When the
 active head changes, use that head's settings and calibration values; do not
 silently apply one head's data to another.
 
-The main `printer.cfg` owns shared hardware configuration. Toolhead files under
-`printer_data/config/toolheads/` are Klipper config fragments: `base.cfg`
-contains common toolhead defaults and `<name>.cfg` contains per-head overrides.
-`toolheads/base.cfg` and `toolheads/active.cfg` are included after shared
-settings; the active link points to the selected profile so the last selected
-head loads at startup. When storing calibration values, follow the include tree
-and update both the selected profile and the latest shared section owner.
+The main `printer.cfg` owns shared hardware configuration and includes
+`hc/hermitcrab.cfg` (copied from `macros/hermitcrab.cfg`), which holds the
+`[hermitcrab]` section, the macros, and `[include toolheads.cfg]`. The toolhead file
+(`hc/toolheads.cfg` by default) is included only by `hc/hermitcrab.cfg` and contains one
+`[hc_head <name>]` section per toolhead, with that head's values only. The active head is stored in the toolhead file as `active_head` in a
+`[hermitcrab state]` section. `SAVE_HEAD` writes calibration values back into the
+matching `[hc_head <name>]` section.
 
 ## Repository conventions
 
@@ -33,13 +33,14 @@ and update both the selected profile and the latest shared section owner.
 - Use `./install.sh install /path/to/klipper` and
   `./install.sh uninstall /path/to/klipper` to manage links in Klipper's
   `klippy/extras/` directory. The script must never replace existing files.
-- The Klipper module is `extras/hermitcrab.py`. Keep its G-code commands,
-  active-profile status, profile switching, and calibration persistence
-  consistent with the setup documented in `README.md`.
-- Profile activation requires a Klipper restart; do not mutate Klipper's
-  config-time objects directly to simulate a live reload.
-- Preserve existing Klipper configuration and merge only the settings owned by
-  this extension.
+  Use `./install.sh config /path/to/printer_data/config` to copy the macros to
+  `hc/` and add the includes to `printer.cfg`; it keeps existing files.
+- The Klipper modules are `extras/hermitcrab.py` (`[hermitcrab]`: commands and
+  status) and `extras/hc_head.py` (`[hc_head <name>]` sections). Keep their
+  G-code commands, status object, and file writes consistent with `README.md`.
+- Head changes apply live through `SET_HEAD`; do not restart Klipper for them.
+- Write only the settings owned by this extension. `SAVE_HEAD` changes only the
+  matching `[hc_head <name>]` section and keeps the commented option template.
 - Retain compatibility with Python 3.8 and Klipper's runtime environment.
 - Use four-space indentation, double-quoted strings, and an 88-character line
   length for Python, following the Ruff configuration in `pyproject.toml`.
