@@ -17,6 +17,7 @@ HEAD_NAME = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 LOGOS: Dict[str, Tuple[str, ...]] = {
     "crab": ("  ,-.       ,-.", "(   )-----(   )", " `-' (o o) `-'", "   /\\/\\_/\\/\\"),
     "cat": (" /\\_/\\", "( o.o )", " > ^ <"),
+    "bunny": (" (\_._/)", " ( o.o )", " > ^ <"),
 }
 HEAD_TEMPLATE = (
     "# Probe offsets are applied to [probe] when this head is selected.",
